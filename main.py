@@ -30,14 +30,17 @@ async def main() -> None:
     if not token:
         raise RuntimeError("BOT_TOKEN не задан в .env")
 
-    gemini_key = os.getenv("GEMINI_API_KEY")
-    if not gemini_key:
-        raise RuntimeError("GEMINI_API_KEY не задан в .env")
-
     db = Database()
     await db.init_db()
 
-    analyzer = AIAnalyzer(api_key=gemini_key)
+    # AI-анализатор: подхватывает все ключи из .env автоматически
+    # Нужен хотя бы один: GEMINI_API_KEY, GROQ_API_KEY, CEREBRAS_API_KEY, OPENROUTER_API_KEY
+    analyzer = AIAnalyzer(
+        api_key=os.getenv("GEMINI_API_KEY"),
+        groq_key=os.getenv("GROQ_API_KEY"),
+        cerebras_key=os.getenv("CEREBRAS_API_KEY"),
+        openrouter_key=os.getenv("OPENROUTER_API_KEY"),
+    )
 
     bot = Bot(token=token, default=DefaultBotProperties(parse_mode="HTML"))
     dp = Dispatcher(storage=MemoryStorage())

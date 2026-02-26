@@ -1,10 +1,14 @@
-aiogram==3.12.0
-aiosqlite==0.20.0
-APScheduler==3.10.4
-python-dotenv==1.0.1
-google-generativeai==0.8.3
+aiogram>=3.12.0
+aiosqlite>=0.20.0
+APScheduler>=3.10.4
+python-dotenv>=1.0.1
+
+# AI провайдеры (Gemini — основной, остальные — fallback)
+google-genai>=1.0.0
+groq>=0.9.0
+openai>=1.30.0
 
 # Парсинг новостей
-feedparser==6.0.11
-beautifulsoup4==4.12.3
-httpx==0.27.2
+feedparser>=6.0.11
+beautifulsoup4>=4.12.3
+httpx>=0.27.0
