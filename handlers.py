@@ -9,10 +9,13 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
+    BotCommand,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
 )
 
 from brain import AIAnalyzer
@@ -53,10 +56,6 @@ class DeleteTopicStates(StatesGroup):
     waiting_for_id = State()
 
 
-class FetchNowStates(StatesGroup):
-    confirming = State()
-
-
 # ── Клавиатуры ────────────────────────────────────────────────
 
 def _build_source_type_keyboard() -> InlineKeyboardMarkup:
@@ -72,8 +71,7 @@ def build_news_keyboard(news_id: str, url: str) -> InlineKeyboardMarkup:
     """
     Клавиатура под новостью: лайк / дизлайк + ссылка «Читать».
 
-    ВАЖНО: кнопка с url НЕ может иметь callback_data — это ограничение Telegram API.
-    Поэтому «Читать» — URL-кнопка без callback, а лайк/дизлайк — callback-кнопки.
+    ВАЖНО: кнопка с url НЕ может иметь callback_data — ограничение Telegram API.
     """
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -107,6 +105,31 @@ def build_main_menu() -> InlineKeyboardMarkup:
     ])
 
 
+def build_reply_menu() -> ReplyKeyboardMarkup:
+    """Постоянная кнопка 📱 Меню внизу чата (ReplyKeyboard)."""
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="📱 Меню")]],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
+
+async def set_bot_commands(bot: Any) -> None:
+    """Установить список команд бота (кнопка / в Telegram)."""
+    commands = [
+        BotCommand(command="menu", description="📱 Главное меню"),
+        BotCommand(command="fetch_now", description="📰 Получить новости сейчас"),
+        BotCommand(command="add_source", description="➕ Добавить источник"),
+        BotCommand(command="add_topic", description="📝 Добавить тему"),
+        BotCommand(command="my_subs", description="📋 Мои подписки"),
+        BotCommand(command="set_time", description="⏰ Время рассылки"),
+        BotCommand(command="set_limit", description="🔢 Количество новостей"),
+        BotCommand(command="help", description="❓ Справка"),
+        BotCommand(command="cancel", description="❌ Отменить действие"),
+    ]
+    await bot.set_my_commands(commands)
+
+
 # ── /start ────────────────────────────────────────────────────
 
 @router.message(Command("start"))
@@ -117,13 +140,24 @@ async def cmd_start(message: Message, db: Database) -> None:
         "Привет! Я SmartNewsBot — собираю новости из твоих источников "
         "и фильтрую по темам.\n\n"
         "Начни с добавления источника и темы.\n"
-        "/help — полный список команд",
-        reply_markup=build_main_menu(),
+        "Жми <b>📱 Меню</b> внизу или /help",
+        reply_markup=build_reply_menu(),
     )
+    await message.answer("📱 Меню:", reply_markup=build_main_menu())
+
+
+# ── Кнопка «📱 Меню» (ReplyKeyboard) ─────────────────────────
+
+@router.message(F.text == "📱 Меню")
+async def btn_menu(message: Message, state: FSMContext) -> None:
+    """Обработка нажатия постоянной кнопки Меню."""
+    await state.clear()
+    await message.answer("📱 Меню:", reply_markup=build_main_menu())
 
 
 @router.message(Command("menu"))
-async def cmd_menu(message: Message) -> None:
+async def cmd_menu(message: Message, state: FSMContext) -> None:
+    await state.clear()
     await message.answer("📱 Меню:", reply_markup=build_main_menu())
 
 
@@ -134,7 +168,7 @@ async def cmd_help(message: Message) -> None:
         "/add_source — добавить источник (RSS/сайт/TG-канал)\n"
         "/add_topic — добавить тему фильтрации\n"
         "/my_subs — все подписки и настройки\n"
-        "/set_time — время рассылки (ЧЧ:ММ UTC)\n"
+        "/set_time — время рассылки (ЧЧ:ММ по Москве)\n"
         "/set_limit — кол-во новостей\n"
         "/del_source — удалить источник\n"
         "/del_topic — удалить тему\n"
@@ -143,7 +177,8 @@ async def cmd_help(message: Message) -> None:
         "<b>Как работает:</b>\n"
         "1. Добавь RSS-ленты, сайты или TG-каналы\n"
         "2. Опиши интересующие темы\n"
-        "3. Получай ежедневную подборку или жми «Получить сейчас»",
+        "3. Получай ежедневную подборку или жми «Получить сейчас»\n\n"
+        "⏰ Всё время — московское (МСК)",
         reply_markup=build_main_menu(),
     )
 
@@ -186,7 +221,7 @@ async def add_source_get_url(message: Message, state: FSMContext) -> None:
         await state.update_data(source_url=url, source_type=SourceType.TG_CHANNEL.value)
         await state.set_state(AddSourceStates.waiting_for_type)
         await message.answer(
-            f"Обнаружена ссылка на Telegram. Сохранить как TG-канал?",
+            "Обнаружена ссылка на Telegram. Сохранить как TG-канал?",
             reply_markup=_build_source_type_keyboard(),
         )
     else:
@@ -262,7 +297,10 @@ async def add_topic_save(message: Message, state: FSMContext, db: Database) -> N
 @router.message(Command("set_time"))
 async def cmd_set_time(message: Message, state: FSMContext) -> None:
     await state.set_state(SetTimeStates.waiting_for_time)
-    await message.answer("Укажи время рассылки (формат ЧЧ:ММ, UTC).\nНапример: 09:00 или 18:30")
+    await message.answer(
+        "⏰ Укажи время рассылки по Москве (МСК).\n"
+        "Формат: ЧЧ:ММ (например 09:00 или 18:30)"
+    )
 
 
 @router.message(SetTimeStates.waiting_for_time)
@@ -283,7 +321,10 @@ async def set_time_save(message: Message, state: FSMContext, db: Database) -> No
     user_id = message.from_user.id  # type: ignore[union-attr]
     await db.update_send_time(user_id=user_id, send_time=time_str)
     await state.clear()
-    await message.answer(f"Время рассылки: {time_str} UTC", reply_markup=build_main_menu())
+    await message.answer(
+        f"✅ Время рассылки: {time_str} МСК",
+        reply_markup=build_main_menu(),
+    )
 
 
 # ── /set_limit ────────────────────────────────────────────────
@@ -307,7 +348,7 @@ async def set_limit_save(message: Message, state: FSMContext, db: Database) -> N
     user_id = message.from_user.id  # type: ignore[union-attr]
     await db.update_news_limit(user_id=user_id, news_limit=limit)
     await state.clear()
-    await message.answer(f"Лимит новостей: {limit}", reply_markup=build_main_menu())
+    await message.answer(f"✅ Лимит новостей: {limit}", reply_markup=build_main_menu())
 
 
 # ── /del_source ───────────────────────────────────────────────
@@ -393,7 +434,7 @@ async def cmd_my_subs(message: Message, db: Database) -> None:
     send_time, news_limit = await db.get_user_settings(user_id)
 
     lines = ["<b>📋 Подписки и настройки</b>\n"]
-    lines.append(f"⏰ Рассылка: {send_time} UTC | 🔢 Лимит: {news_limit}\n")
+    lines.append(f"⏰ Рассылка: {send_time} МСК | 🔢 Лимит: {news_limit}\n")
 
     lines.append("<b>Источники:</b>")
     if sources:
@@ -415,52 +456,45 @@ async def cmd_my_subs(message: Message, db: Database) -> None:
 
 # ── /fetch_now — получить новости прямо сейчас ────────────────
 
-@router.message(Command("fetch_now"))
-async def cmd_fetch_now(message: Message, db: Database, analyzer: AIAnalyzer) -> None:
-    """Запустить сбор и отправку новостей вручную, не дожидаясь расписания."""
+async def _do_fetch_now(bot: Any, db: Database, analyzer: AIAnalyzer, user_id: int) -> str:
+    """Общая логика fetch_now. Возвращает текст результата."""
     from scheduler import send_news_for_user
-    from parser import parse_website, parse_tg_channel
 
-    user_id = message.from_user.id  # type: ignore[union-attr]
     user = await db.get_user(user_id)
     if not user:
-        await message.answer("Сначала выполни /start.")
-        return
+        return "Сначала выполни /start."
 
     topics = await db.list_topics(user_id=user_id)
     sources = await db.list_sources(user_id=user_id)
     if not topics:
-        await message.answer("Добавь хотя бы одну тему (/add_topic).", reply_markup=build_main_menu())
-        return
+        return "Добавь хотя бы одну тему (/add_topic)."
     if not sources:
-        await message.answer("Добавь хотя бы один источник (/add_source).", reply_markup=build_main_menu())
-        return
-
-    await message.answer("⏳ Собираю новости из твоих источников...")
+        return "Добавь хотя бы один источник (/add_source)."
 
     try:
-        count = await send_news_for_user(
-            bot=message.bot,  # type: ignore[arg-type]
+        result = await send_news_for_user(
+            bot=bot,
             db=db,
             analyzer=analyzer,
             user=user,
         )
-        if count == 0:
-            await message.answer(
-                "Не нашёл подходящих новостей. Возможные причины:\n"
-                "• Источники пока не отдают статьи (проверь URL)\n"
-                "• Ни одна статья не прошла фильтр по твоим темам\n"
-                "• Все новости уже были отправлены ранее",
-                reply_markup=build_main_menu(),
-            )
+
+        if result.sent > 0:
+            return f"✅ Отправлено {result.sent} новостей!\n\n{result.diagnostics}"
         else:
-            await message.answer(
-                f"Готово! Отправлено {count} новостей.",
-                reply_markup=build_main_menu(),
-            )
+            return f"Подходящих новостей не найдено.\n\n{result.diagnostics}"
+
     except Exception as e:
         logger.error(f"fetch_now error for user {user_id}: {e}", exc_info=True)
-        await message.answer(f"Ошибка при сборе новостей: {e}", reply_markup=build_main_menu())
+        return f"Ошибка: {e}"
+
+
+@router.message(Command("fetch_now"))
+async def cmd_fetch_now(message: Message, db: Database, analyzer: AIAnalyzer) -> None:
+    await message.answer("⏳ Собираю новости из твоих источников...")
+    user_id = message.from_user.id  # type: ignore[union-attr]
+    text = await _do_fetch_now(message.bot, db, analyzer, user_id)
+    await message.answer(text, reply_markup=build_main_menu())
 
 
 # ── Menu callback handler ────────────────────────────────────
@@ -497,7 +531,7 @@ async def menu_callbacks(callback: CallbackQuery, state: FSMContext, db: Databas
         send_time, news_limit = await db.get_user_settings(user_id)
 
         lines = ["<b>📋 Подписки</b>\n"]
-        lines.append(f"⏰ {send_time} UTC | 🔢 {news_limit} новостей\n")
+        lines.append(f"⏰ {send_time} МСК | 🔢 {news_limit} новостей\n")
         if sources:
             lines.append("<b>Источники:</b>")
             for s in sources:
@@ -517,7 +551,10 @@ async def menu_callbacks(callback: CallbackQuery, state: FSMContext, db: Databas
 
     elif action == "set_time":
         await state.set_state(SetTimeStates.waiting_for_time)
-        await callback.message.edit_text("Укажи время рассылки (ЧЧ:ММ UTC):")  # type: ignore[union-attr]
+        await callback.message.edit_text(  # type: ignore[union-attr]
+            "⏰ Укажи время рассылки по Москве (МСК).\n"
+            "Формат: ЧЧ:ММ (например 09:00)"
+        )
         await callback.answer()
 
     elif action == "set_limit":
@@ -556,48 +593,10 @@ async def menu_callbacks(callback: CallbackQuery, state: FSMContext, db: Databas
 
     elif action == "fetch_now":
         await callback.answer("Собираю новости...")
-        # Создаём фейковое сообщение через бот
         await callback.message.edit_text("⏳ Собираю новости...")  # type: ignore[union-attr]
 
-        from scheduler import send_news_for_user
-
-        user = await db.get_user(user_id)
-        if not user:
-            await callback.message.edit_text("Сначала /start.", reply_markup=build_main_menu())  # type: ignore[union-attr]
-            return
-
-        topics = await db.list_topics(user_id=user_id)
-        sources = await db.list_sources(user_id=user_id)
-        if not topics or not sources:
-            await callback.message.edit_text(  # type: ignore[union-attr]
-                "Добавь источники и темы.",
-                reply_markup=build_main_menu(),
-            )
-            return
-
-        try:
-            count = await send_news_for_user(
-                bot=callback.bot,  # type: ignore[arg-type]
-                db=db,
-                analyzer=analyzer,
-                user=user,
-            )
-            if count == 0:
-                await callback.message.edit_text(  # type: ignore[union-attr]
-                    "Подходящих новостей не найдено.",
-                    reply_markup=build_main_menu(),
-                )
-            else:
-                await callback.message.edit_text(  # type: ignore[union-attr]
-                    f"Отправлено {count} новостей!",
-                    reply_markup=build_main_menu(),
-                )
-        except Exception as e:
-            logger.error(f"fetch_now callback error: {e}", exc_info=True)
-            await callback.message.edit_text(  # type: ignore[union-attr]
-                f"Ошибка: {e}",
-                reply_markup=build_main_menu(),
-            )
+        text = await _do_fetch_now(callback.bot, db, analyzer, user_id)
+        await callback.message.edit_text(text, reply_markup=build_main_menu())  # type: ignore[union-attr]
 
 
 # ── Оценки под новостями ──────────────────────────────────────
@@ -632,4 +631,4 @@ async def news_callbacks(callback: CallbackQuery, db: Database, analyzer: AIAnal
         await callback.answer("Учту 👎")
 
 
-__all__ = ["router", "build_news_keyboard"]
+__all__ = ["router", "build_news_keyboard", "set_bot_commands"]

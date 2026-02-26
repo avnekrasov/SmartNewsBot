@@ -2,12 +2,13 @@
 Планировщик ежедневной рассылки новостей.
 
 Джоба запускается каждый час и проверяет, пора ли слать конкретному пользователю
-(сравнивая текущий час UTC с его send_time).
+(сравнивая текущий час МСК с его send_time).
 """
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime, timezone, timedelta
 from typing import List
 
 from aiogram import Bot
@@ -20,10 +21,46 @@ from parser import ParsedArticle, parse_tg_channel, parse_website
 
 logger = logging.getLogger(__name__)
 
+# Московское время UTC+3
+MSK = timezone(timedelta(hours=3))
 
-async def _collect_articles(db: Database, user: User) -> List[ParsedArticle]:
-    """Собрать статьи из всех источников пользователя."""
+
+@dataclass
+class FetchResult:
+    """Результат сбора новостей для диагностики."""
+    total_parsed: int = 0
+    already_sent: int = 0
+    ai_checked: int = 0
+    ai_relevant: int = 0
+    ai_failed: int = 0
+    sent: int = 0
+    source_errors: list[str] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.source_errors is None:
+            self.source_errors = []
+
+    @property
+    def diagnostics(self) -> str:
+        lines = []
+        lines.append(f"📊 Собрано статей: {self.total_parsed}")
+        if self.source_errors:
+            lines.append(f"⚠️ Ошибки источников: {len(self.source_errors)}")
+        if self.already_sent:
+            lines.append(f"🔄 Уже отправлялись: {self.already_sent}")
+        if self.ai_checked:
+            lines.append(f"🤖 Проверено AI: {self.ai_checked}")
+            lines.append(f"✅ Релевантных: {self.ai_relevant}")
+        if self.ai_failed:
+            lines.append(f"❌ AI ошибки (квота?): {self.ai_failed}")
+        lines.append(f"📨 Отправлено: {self.sent}")
+        return "\n".join(lines)
+
+
+async def _collect_articles(db: Database, user: User) -> tuple[List[ParsedArticle], list[str]]:
+    """Собрать статьи из всех источников. Вернуть (статьи, ошибки)."""
     articles: List[ParsedArticle] = []
+    errors: list[str] = []
     sources = await db.list_sources(user_id=user.user_id)
 
     for source in sources:
@@ -36,9 +73,11 @@ async def _collect_articles(db: Database, user: User) -> List[ParsedArticle]:
                 continue
             articles.extend(new)
         except Exception as e:
-            logger.warning(f"Source {source.source_url} failed: {e}")
+            err = f"{source.source_url}: {e}"
+            logger.warning(f"Source failed: {err}")
+            errors.append(err)
 
-    return articles
+    return articles, errors
 
 
 async def send_news_for_user(
@@ -46,46 +85,70 @@ async def send_news_for_user(
     db: Database,
     analyzer: AIAnalyzer,
     user: User,
-) -> int:
+) -> FetchResult:
     """
     Собрать, отфильтровать и отправить новости одному пользователю.
 
+    Если AI недоступен (все проверки упали) — отправляет без фильтрации.
+
     Returns:
-        Количество отправленных новостей.
+        FetchResult с полной диагностикой.
     """
+    result = FetchResult()
+
     topics = await db.list_topics(user.user_id)
     if not topics:
-        return 0
+        return result
 
-    articles = await _collect_articles(db, user)
+    articles, errors = await _collect_articles(db, user)
+    result.source_errors = errors
+    result.total_parsed = len(articles)
+
     if not articles:
-        return 0
+        return result
 
     _, news_limit = await db.get_user_settings(user.user_id)
 
-    # Фильтрация через AI + дедупликация
-    relevant: list[tuple[ParsedArticle, int | None, float]] = []
+    # Дедупликация
+    new_articles: list[ParsedArticle] = []
     for article in articles:
-        # Пропускаем уже отправленные
         if await db.is_news_sent(user.user_id, article.id):
-            continue
+            result.already_sent += 1
+        else:
+            new_articles.append(article)
 
-        result = await analyzer.check_relevance(
+    if not new_articles:
+        return result
+
+    # Фильтрация через AI
+    relevant: list[tuple[ParsedArticle, int | None, float]] = []
+    for article in new_articles:
+        relevance = await analyzer.check_relevance(
             article_text=article.text,
             user_topics=topics,
         )
-        if result.is_relevant:
-            relevant.append((article, result.matched_topic_id, result.confidence))
+        result.ai_checked += 1
 
-    if not relevant:
-        return 0
+        if relevance.is_relevant:
+            result.ai_relevant += 1
+            relevant.append((article, relevance.matched_topic_id, relevance.confidence))
+        elif relevance.confidence == 0.0 and not relevance.is_relevant:
+            # confidence=0 + not relevant = вероятно AI упал (квота/ошибка)
+            result.ai_failed += 1
 
-    # Сортируем по confidence (desc) и берём top-N
-    relevant.sort(key=lambda x: x[2], reverse=True)
-    to_send = relevant[:news_limit]
+    # Если AI полностью недоступен — шлём без фильтрации (первые N)
+    to_send: list[tuple[ParsedArticle, int | None, float]]
+    if relevant:
+        relevant.sort(key=lambda x: x[2], reverse=True)
+        to_send = relevant[:news_limit]
+    elif result.ai_failed == result.ai_checked and result.ai_checked > 0:
+        # AI лёг на всех запросах — шлём без фильтра
+        logger.warning(f"AI unavailable for user {user.user_id}, sending unfiltered")
+        to_send = [(a, None, 0.0) for a in new_articles[:news_limit]]
+    else:
+        return result
 
-    # Отправляем каждую новость отдельным сообщением с кнопками
-    sent_count = 0
+    # Отправка
     for article, topic_id, confidence in to_send:
         text = f"<b>{article.title}</b>\n\n"
         if article.text != article.title:
@@ -102,24 +165,22 @@ async def send_news_for_user(
                 disable_web_page_preview=True,
             )
             await db.mark_news_sent(user.user_id, article.id)
-            sent_count += 1
+            result.sent += 1
         except Exception as e:
             logger.error(f"Failed to send news to {user.user_id}: {e}")
 
-    return sent_count
+    return result
 
 
 async def _hourly_check(bot: Bot, db: Database, analyzer: AIAnalyzer) -> None:
     """
     Джоба, запускаемая каждый час.
-    Проверяет, совпадает ли текущий час с send_time пользователя.
+    Проверяет, совпадает ли текущий час МСК с send_time пользователя.
     """
-    now = datetime.now(timezone.utc)
-    current_hhmm = f"{now.hour:02d}:{now.minute // 30 * 30:02d}"  # Округляем до 30 мин
+    now = datetime.now(MSK)
 
     users = await db.list_users()
     for user in users:
-        # Проверяем, совпадает ли час
         try:
             user_hour = int(user.send_time.split(":")[0])
         except (ValueError, IndexError):
@@ -130,12 +191,12 @@ async def _hourly_check(bot: Bot, db: Database, analyzer: AIAnalyzer) -> None:
 
         logger.info(f"Sending daily news to user {user.user_id}")
         try:
-            count = await send_news_for_user(bot, db, analyzer, user)
-            logger.info(f"User {user.user_id}: sent {count} news")
+            fetch_result = await send_news_for_user(bot, db, analyzer, user)
+            logger.info(f"User {user.user_id}: {fetch_result.diagnostics}")
         except Exception as e:
             logger.error(f"Failed daily news for user {user.user_id}: {e}", exc_info=True)
 
-    # Периодическая очистка старых записей
+    # Периодическая очистка
     try:
         await db.cleanup_old_sent_news(days=30)
     except Exception:
@@ -149,20 +210,15 @@ def setup_scheduler(
     db: Database,
     analyzer: AIAnalyzer,
 ) -> None:
-    """
-    Настраивает ежечасную проверку для рассылки новостей.
-
-    Каждый час джоба проверяет, совпадает ли текущий час UTC
-    с send_time пользователя, и если да — отправляет подборку.
-    """
+    """Ежечасная проверка для рассылки (по московскому времени)."""
     scheduler.add_job(
         _hourly_check,
         "cron",
-        minute=0,  # Каждый час в :00
+        minute=0,
         kwargs={"bot": bot, "db": db, "analyzer": analyzer},
         id="hourly_news_check",
         replace_existing=True,
     )
 
 
-__all__ = ["setup_scheduler", "send_news_for_user"]
+__all__ = ["setup_scheduler", "send_news_for_user", "FetchResult"]

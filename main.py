@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 from brain import AIAnalyzer
 from database import Database
-from handlers import router as handlers_router
+from handlers import router as handlers_router, set_bot_commands
 from middleware import DependencyInjectionMiddleware
 from scheduler import setup_scheduler
 
@@ -52,11 +52,15 @@ async def main() -> None:
 
     dp.include_router(handlers_router)
 
-    # Планировщик
-    scheduler = AsyncIOScheduler(timezone="UTC")
+    # Установить команды бота (кнопка / в Telegram)
+    await set_bot_commands(bot)
+    logger.info("Bot commands registered")
+
+    # Планировщик (время — МСК, UTC+3)
+    scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
     setup_scheduler(scheduler, bot=bot, db=db, analyzer=analyzer)
     scheduler.start()
-    logger.info("Scheduler started (hourly news check)")
+    logger.info("Scheduler started (hourly check, MSK timezone)")
 
     logger.info("Bot is starting...")
     try:
