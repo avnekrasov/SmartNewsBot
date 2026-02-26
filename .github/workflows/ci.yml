@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check syntax (compile all .py)
+        run: python -m py_compile main.py database.py handlers.py brain.py parser.py scheduler.py middleware.py
+
+      - name: Verify imports
+        run: python -c "from database import Database; from brain import AIAnalyzer; from parser import parse_website; from handlers import router; from scheduler import setup_scheduler; print('All imports OK')"
