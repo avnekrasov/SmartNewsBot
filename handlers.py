@@ -139,7 +139,8 @@ async def cmd_start(message: Message, db: Database) -> None:
     await message.answer(
         "Привет! Я SmartNewsBot — собираю новости из твоих источников "
         "и фильтрую по темам.\n\n"
-        "Начни с добавления источника и темы.\n"
+        "Начни с добавления источника.\n"
+        "Добавь темы — и AI будет отбирать только нужное.\n"
         "Жми <b>📱 Меню</b> внизу или /help",
         reply_markup=build_reply_menu(),
     )
@@ -176,8 +177,10 @@ async def cmd_help(message: Message) -> None:
         "/cancel — отменить текущее действие\n\n"
         "<b>Как работает:</b>\n"
         "1. Добавь RSS-ленты, сайты или TG-каналы\n"
-        "2. Опиши интересующие темы\n"
+        "2. (Опционально) Опиши интересующие темы для AI-фильтрации\n"
         "3. Получай ежедневную подборку или жми «Получить сейчас»\n\n"
+        "💡 Без тем — получишь все новости из источников.\n"
+        "С темами — AI отберёт только релевантные.\n\n"
         "⏰ Всё время — московское (МСК)",
         reply_markup=build_main_menu(),
     )
@@ -464,10 +467,7 @@ async def _do_fetch_now(bot: Any, db: Database, analyzer: AIAnalyzer, user_id: i
     if not user:
         return "Сначала выполни /start."
 
-    topics = await db.list_topics(user_id=user_id)
     sources = await db.list_sources(user_id=user_id)
-    if not topics:
-        return "Добавь хотя бы одну тему (/add_topic)."
     if not sources:
         return "Добавь хотя бы один источник (/add_source)."
 

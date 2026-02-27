@@ -97,8 +97,6 @@ async def send_news_for_user(
     result = FetchResult()
 
     topics = await db.list_topics(user.user_id)
-    if not topics:
-        return result
 
     articles, errors = await _collect_articles(db, user)
     result.source_errors = errors
@@ -120,33 +118,39 @@ async def send_news_for_user(
     if not new_articles:
         return result
 
-    # Фильтрация через AI
-    relevant: list[tuple[ParsedArticle, int | None, float]] = []
-    for article in new_articles:
-        relevance = await analyzer.check_relevance(
-            article_text=article.text,
-            user_topics=topics,
-        )
-        result.ai_checked += 1
-
-        if relevance.is_relevant:
-            result.ai_relevant += 1
-            relevant.append((article, relevance.matched_topic_id, relevance.confidence))
-        elif relevance.confidence == 0.0 and not relevance.is_relevant:
-            # confidence=0 + not relevant = вероятно AI упал (квота/ошибка)
-            result.ai_failed += 1
-
-    # Если AI полностью недоступен — шлём без фильтрации (первые N)
     to_send: list[tuple[ParsedArticle, int | None, float]]
-    if relevant:
-        relevant.sort(key=lambda x: x[2], reverse=True)
-        to_send = relevant[:news_limit]
-    elif result.ai_failed == result.ai_checked and result.ai_checked > 0:
-        # AI лёг на всех запросах — шлём без фильтра
-        logger.warning(f"AI unavailable for user {user.user_id}, sending unfiltered")
+
+    if not topics:
+        # Темы не заданы — шлём последние N без AI-фильтрации
+        logger.info(f"No topics for user {user.user_id}, sending unfiltered")
         to_send = [(a, None, 0.0) for a in new_articles[:news_limit]]
     else:
-        return result
+        # Фильтрация через AI
+        relevant: list[tuple[ParsedArticle, int | None, float]] = []
+        for article in new_articles:
+            relevance = await analyzer.check_relevance(
+                article_text=article.text,
+                user_topics=topics,
+            )
+            result.ai_checked += 1
+
+            if relevance.is_relevant:
+                result.ai_relevant += 1
+                relevant.append((article, relevance.matched_topic_id, relevance.confidence))
+            elif relevance.confidence == 0.0 and not relevance.is_relevant:
+                # confidence=0 + not relevant = вероятно AI упал (квота/ошибка)
+                result.ai_failed += 1
+
+        # Если AI полностью недоступен — шлём без фильтрации (первые N)
+        if relevant:
+            relevant.sort(key=lambda x: x[2], reverse=True)
+            to_send = relevant[:news_limit]
+        elif result.ai_failed == result.ai_checked and result.ai_checked > 0:
+            # AI лёг на всех запросах — шлём без фильтра
+            logger.warning(f"AI unavailable for user {user.user_id}, sending unfiltered")
+            to_send = [(a, None, 0.0) for a in new_articles[:news_limit]]
+        else:
+            return result
 
     # Отправка
     for article, topic_id, confidence in to_send:

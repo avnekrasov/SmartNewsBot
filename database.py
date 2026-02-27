@@ -110,18 +110,11 @@ class Database:
 
     # ── user helpers ──────────────────────────────────────────
 
-    async def upsert_user(
-        self, user_id: int, send_time: str = "09:00", news_limit: int = 10
-    ) -> None:
+    async def upsert_user(self, user_id: int) -> None:
+        """Создать пользователя если не существует. Если уже есть — ничего не менять."""
         await self.conn.execute(
-            """
-            INSERT INTO users (user_id, send_time, news_limit)
-            VALUES (?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE
-                SET send_time  = COALESCE(excluded.send_time,  users.send_time),
-                    news_limit = COALESCE(excluded.news_limit, users.news_limit);
-            """,
-            (user_id, send_time, news_limit),
+            "INSERT OR IGNORE INTO users (user_id) VALUES (?);",
+            (user_id,),
         )
         await self.conn.commit()
 
